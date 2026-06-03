@@ -1,0 +1,118 @@
+# =============================================================
+# Python
+# =============================================================
+# Bytecode / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+*.whl
+MANIFEST
+.installed.cfg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# =============================================================
+# Testing
+# =============================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# =============================================================
+# Type checking
+# =============================================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# =============================================================
+# Linting / formatting
+# =============================================================
+.ruff_cache/
+
+# =============================================================
+# Secrets / environment
+# =============================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.*
+
+# =============================================================
+# OS
+# =============================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =============================================================
+# Editors / IDEs
+# =============================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# =============================================================
+# Project-specific: watermark pipeline
+# =============================================================
+# Source / output videos (large binaries)
+omni.mp4
+omni_clean.mp4
+
+# Extracted frame caches
+frames/
+
+# Inpainting mask artifacts
+mask.png
+
+# Research / scraping tool cache
+.firecrawl/
+
+# Local scratch
+tmp/
+temp/
+*.tmp
+frames_*/

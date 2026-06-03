@@ -1,0 +1,66 @@
+[project]
+name = "watermark"
+version = "0.1.0"
+description = "Remove Gemini ✦ watermark from omni.mp4 using local LaMa inpainting on Apple Silicon"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+    "structlog>=24.1",
+    "pydantic-settings>=2.0",
+    "Pillow>=9.5",
+    "opencv-python-headless>=4.10",
+    # simple-lama-inpainting is optional; only used when --backend lama is chosen.
+    # Kept out of required deps because OpenCV's Telea is faster for our case.
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+watermark = "watermark.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/watermark"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "UP", "N", "S", "SIM", "T20",
+    "PLR", "PLW", "TRY", "G",
+    "ARG", "C4", "C90", "EM", "FBT", "DTZ", "PERF", "ISC", "SLOT",
+]
+unfixable = ["S307", "S609", "S301", "S302", "S105", "S106", "S107"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "PLR2004", "ARG001"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = ["PIL", "simple_lama_inpainting"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
