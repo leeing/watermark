@@ -1,39 +1,41 @@
 # watermark
 
-Remove the bottom-right **Gemini ✦** watermark from videos (`omni.mp4`, `Flow_202606032214.mp4`, etc.) using local, quality-first inpainting or mathematically lossless reverse alpha blending.
+使用本地高质量 inpainting 或数学无损的逆向 alpha 混合，去除视频右下角 **Gemini ✦** 水印（支持 `omni.mp4`、`Flow_202606032214.mp4` 等）。
 
-## Prerequisites
+## 环境准备
 
 - [uv](https://github.com/astral-sh/uv) ≥ 0.10
 - ffmpeg ≥ 8.0 (`brew install ffmpeg`)
 
-## Install
+## 安装
 
 ```bash
 uv sync
 ```
 
-## Usage
+## 使用方式
 
-The project supports two main workflows: **Mathematically Lossless (Alpha)** and **Heuristic Inpainting (Telea/NS/LaMa)**.
+项目支持两种主要工作流：**数学无损（Alpha）** 和 **启发式 Inpainting（Telea / NS / LaMa）**。
 
-### 1. Mathematically Lossless Route (Alpha Backend) - Recommended
+### 1. 数学无损路线（Alpha Backend）—— 推荐
 
-This route uses the reverse alpha blending formula to subtract the watermark, restoring the exact original background pixels underneath.
+此路线使用逆向 alpha 混合公式减去水印，精确恢复原始背景像素。
 
-#### Running Watermark Removal:
-You can specify the input and output videos using environment variables `WATERMARK_SOURCE_VIDEO` and `WATERMARK_OUTPUT_VIDEO`:
+#### 运行水印去除：
+
+可通过环境变量 `WATERMARK_SOURCE_VIDEO` 和 `WATERMARK_OUTPUT_VIDEO` 指定输入/输出视频：
 
 ```bash
-# Clean Flow_202606032214.mp4 using the alpha backend
+# 使用 alpha backend 清除 Flow_202606032214.mp4
 WATERMARK_SOURCE_VIDEO=Flow_202606032214.mp4 WATERMARK_OUTPUT_VIDEO=Flow_clean.mp4 uv run python -m watermark.main remove --backend alpha
 
-# Clean omni.mp4 using the alpha backend
+# 使用 alpha backend 清除 omni.mp4
 WATERMARK_SOURCE_VIDEO=omni.mp4 WATERMARK_OUTPUT_VIDEO=omni_clean.mp4 uv run python -m watermark.main remove --backend alpha
 ```
 
-#### CLI Calibrating:
-If the pre-calibrated alpha map doesn't exist or you are using a new video resolution / watermark style, you can calibrate a new alpha map from a solid-background video:
+#### CLI 标定：
+
+如果预标定的 alpha map 不存在，或你使用了新的视频分辨率/水印样式，可以从纯色背景视频标定新的 alpha map：
 
 ```bash
 uv run python -m watermark.main calibrate \
@@ -46,75 +48,78 @@ uv run python -m watermark.main calibrate \
 
 ---
 
-### 2. Heuristic Inpainting Route (Telea / NS / LaMa)
+### 2. 启发式 Inpainting 路线（Telea / NS / LaMa）
 
-If the alpha map is not available or you are working with non-standard watermarks, you can use heuristic inpainting:
+如果没有 alpha map，或处理的是非标准水印，可使用启发式 inpainting：
 
 ```bash
-# Step 1: extract first frame and crop watermark region for human inspection
+# 第 1 步：提取首帧并裁剪水印区域供人工检查
 uv run python -m watermark.main detect omni.mp4
-open frames/watermark_crop.png   # verify the ✦ is fully inside the crop
+open frames/watermark_crop.png   # 确认 ✦ 完全位于裁剪区域内
 
-# Step 2: generate a refined symbol-shaped mask.png from the bbox constants
+# 第 2 步：根据 bbox 常量生成精细的符号形状 mask.png
 uv run python -m watermark.main mask
-open frames/mask_overlay.png     # verify the red box covers the ✦
+open frames/mask_overlay.png     # 确认红色框覆盖 ✦
 
-# Step 3: inpaint + reassemble using Telea (visually perfect, fast)
+# 第 3 步：使用 Telea 进行 inpainting + 重组（视觉完美，速度快）
 uv run python -m watermark.main remove --backend telea --mask-mode watermark --radius 3 --texture-strength 0.25 --feather 2
 ```
 
 ---
 
-## The Alpha Principle (Reverse Alpha Blending)
+## Alpha 原理（逆向 Alpha 混合）
 
-Gemini applies watermarks to frames using a per-pixel linear alpha compositing formula:
+Gemini 使用逐像素线性 alpha 合成公式对帧添加水印：
 
 $$\text{watermarked} = \alpha \cdot \text{logo} + (1 - \alpha) \cdot \text{original}$$
 
-Where:
-- $\alpha \in [0, 1]$ is the opacity (per-pixel alpha map, a static 96x96 matrix).
-- $\text{logo}$ is the color of the watermark logo (typically pure white, `(255, 255, 255)`).
-- $\text{original}$ is the unpolluted background frame.
+其中：
+- $\alpha \in [0, 1]$ 为不透明度（逐像素 alpha map，96×96 静态矩阵）。
+- $\text{logo}$ 为水印 logo 的颜色（通常为纯白，`(255, 255, 255)`）。
+- $\text{original}$ 为未被污染的原始背景帧。
 
-Since the forward operation is linear, it can be mathematically inverted (Lossless):
+由于正向操作是线性的，可以数学上精确逆向（无损）：
 
 $$\text{original} = \frac{\text{watermarked} - \alpha \cdot \text{logo}}{1 - \alpha}$$
 
-### Advanced Optimizations in this Project:
-- **Per-Pixel Adaptive Alpha Clamping**: On dark background frames, reverse alpha division can lead to numerical underflow (resulting in negative pixels). Our pipeline uses per-pixel background-aware clamping:
+### 本项目的高级优化：
+
+- **逐像素自适应 Alpha 钳位**：在暗背景帧上，逆向 alpha 除法可能导致数值下溢（产生负像素值）。本管线采用逐像素背景感知钳位：
   $$\alpha_{\text{safe}} = \min\left(\alpha_{\text{map}}, \frac{\text{min\_channel}(\text{watermarked})}{\max(\text{logo})}\right)$$
-  This guarantees that all reconstructed pixels remain in the valid $[0, 255]$ range, avoiding artifacts on dark backgrounds.
-- **Robust Multi-Frame Anchor Search**: Watermark placement can slightly shift by a few pixels depending on the video. The CLI runs ZNCC (Zero-mean Normalized Cross-Correlation) sliding template-matching on multiple sample frames and uses median-voted coordinates to achieve sub-pixel alignment accuracy.
-- **PNG-Level verification**: The verification step performs PNG-level round-trip reconstruction difference checking to ensure that the reconstructed frame $\text{forward}(\text{reverse}(\text{frame})) \approx \text{frame}$ holds perfectly within tolerances.
+  这保证所有重建像素保持在 $[0, 255]$ 有效范围内，避免暗背景上的伪影。
+
+- **鲁棒多帧锚点搜索**：水印位置可能因视频不同而偏移若干像素。CLI 对多帧采样运行 ZNCC（零均值归一化互相关）滑动模板匹配，并使用中值投票坐标实现亚像素对齐精度。
+
+- **像素级验证**：验证步骤执行像素级往返重建差异检查，确保重建帧 $\text{forward}(\text{reverse}(\text{frame})) \approx \text{frame}$ 在容差内完全成立。
 
 ---
 
-## Tuning the bbox
+## 调整 bbox
 
-If the watermark isn't fully covered when using heuristic inpainting, edit `src/watermark/consts.py`:
+若使用启发式 inpainting 时水印未完全覆盖，编辑 `src/watermark/consts.py`：
 
 ```python
 WATERMARK_BBOX: tuple[int, int, int, int] = (890, 1720, 990, 1830)  # left, top, right, bottom
 ```
 
-Then re-run `uv run python -m watermark.main remove`.
+然后重新运行 `uv run python -m watermark.main remove`。
 
-## CLI Arguments for `remove`
+## `remove` 命令参数
 
-- `--backend [telea|alpha|ns|lama]`: The inpainting backend. Default: `telea`.
-- `--bbox TEXT`: Custom watermark bounding box (left,top,right,bottom).
-- `--device [mps|cpu|cuda]`: PyTorch device for LaMa. Default: `mps`.
-- `--dilate INTEGER`: Mask dilation size. Default: `4`.
-- `--mask-mode [watermark|rectangle]`: Symbol-refined mask or full rectangle box. Default: `watermark`.
-- `--radius INTEGER`: OpenCV inpainting radius. Default: `3`.
-- `--texture-strength FLOAT`: Local texture restoration strength. Default: `0.25`.
-- `--feather INTEGER`: Blending feather size. Default: `2`.
-- `--skip-verify`: Skip checking constraints (not recommended for production).
+- `--backend [telea|alpha|ns|lama]`：Inpainting 后端。默认：`telea`。
+- `--bbox TEXT`：自定义水印边界框 (left,top,right,bottom)。
+- `--device [mps|cpu|cuda]`：LaMa 使用的 PyTorch 设备。默认：`mps`。
+- `--dilate INTEGER`：Mask 膨胀大小。默认：`4`。
+- `--mask-mode [watermark|rectangle]`：符号细化 mask 或完整矩形框。默认：`watermark`。
+- `--radius INTEGER`：OpenCV inpainting 半径。默认：`3`。
+- `--texture-strength FLOAT`：局部纹理恢复强度。默认：`0.25`。
+- `--feather INTEGER`：混合羽化大小。默认：`2`。
+- `--skip-verify`：跳过约束检查（不推荐用于生产环境）。
 
-## Acceptance Criteria
+## 验收标准
 
-- `ffprobe omni_clean.mp4` reports `width=1080 height=1920 nb_frames=240 duration≈10s`
-- Audio MD5 of source and clean videos are **byte-identical** (using `-c:a copy` bypasses re-encoding).
-- Watermark is completely invisible in all frames.
+- `ffprobe omni_clean.mp4` 输出 `width=1080 height=1920 nb_frames=240 duration≈10s`
+- 源视频与处理后视频的音频 MD5 **逐字节一致**（使用 `-c:a copy` 跳过重新编码）。
+- 所有帧中水印完全不可见。
 
-See [SPEC.md](SPEC.md) for details.
+详见 [SPEC.md](SPEC.md)。
