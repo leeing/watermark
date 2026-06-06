@@ -2,6 +2,7 @@
 
 import click
 
+from watermark.commands.calibrate import calibrate_cmd
 from watermark.commands.detect import detect_cmd
 from watermark.commands.mask import mask_cmd
 from watermark.commands.remove import remove_cmd
@@ -13,6 +14,7 @@ def cli() -> None:
     """Remove Gemini ✦ watermark from omni.mp4 using local LaMa inpainting."""
 
 
+cli.add_command(calibrate_cmd, name="calibrate")
 cli.add_command(detect_cmd, name="detect")
 cli.add_command(mask_cmd, name="mask")
 cli.add_command(remove_cmd, name="remove")

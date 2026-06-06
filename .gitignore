@@ -99,8 +99,7 @@ Thumbs.db
 # Project-specific: watermark pipeline
 # =============================================================
 # Source / output videos (large binaries)
-omni.mp4
-omni_clean.mp4
+*.mp4
 
 # Extracted frame caches
 frames/
@@ -116,3 +115,12 @@ tmp/
 temp/
 *.tmp
 frames_*/
+
+# Antigravity CLI state
+.antigravitycli/
+
+# Notebook checkpoints (Jupyter)
+.ipynb_checkpoints/
+
+# Codex CLI runtime state
+.codex/

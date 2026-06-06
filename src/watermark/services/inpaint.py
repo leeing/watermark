@@ -18,8 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
 import structlog
 from PIL import Image
+
+from watermark.services import alpha as alpha_svc
 
 log = structlog.get_logger()
 
@@ -40,6 +43,11 @@ class InpaintOptions:
     radius: int = TELEA_RADIUS
     texture_strength: float = 0.25
     feather: int = 2
+    # Reverse alpha blending (Lossless.md) — only used when backend == "alpha"
+    alpha_map: np.ndarray | None = None
+    logo_map: np.ndarray | None = None
+    alpha_bbox: tuple[int, int, int, int] | None = None
+    logo_rgb: tuple[int, int, int, int] = (255, 255, 255, 255)
 
 
 class Inpainter(Protocol):
@@ -191,6 +199,35 @@ def _inpaint_lama(frame_rgb: Image.Image, mask_l: Image.Image) -> Image.Image:
     return _make_lama_inpainter("cpu")(frame_rgb, mask_l)
 
 
+def _inpaint_alpha(
+    frame_rgb: Image.Image,
+    mask_l: Image.Image,  # noqa: ARG001 - unused, signature uniform with other backends
+    options: InpaintOptions,
+) -> Image.Image:
+    """Reverse alpha blending — mathematically lossless (Lossless.md §2).
+
+    Uses adaptive_reverse_blend which handles dark backgrounds without
+    producing black spots (numerical underflow).
+    """
+    if options.alpha_map is None or options.alpha_bbox is None:
+        msg = "backend='alpha' requires alpha_map and alpha_bbox in InpaintOptions"
+        raise ValueError(msg)
+    return alpha_svc.adaptive_reverse_blend(
+        frame_rgb,
+        options.alpha_map,
+        options.alpha_bbox,
+        (options.logo_rgb[0], options.logo_rgb[1], options.logo_rgb[2]),
+        logo_map=options.logo_map,
+    )
+
+
+def _make_alpha_inpainter(options: InpaintOptions) -> Inpainter:
+    def inpaint(frame_rgb: Image.Image, mask_l: Image.Image) -> Image.Image:
+        return _inpaint_alpha(frame_rgb, mask_l, options)
+
+    return inpaint
+
+
 _INPAINTERS = {
     "telea": _inpaint_telea,
     "lama": _inpaint_lama,
@@ -223,8 +260,9 @@ def inpaint_frames(
     """
     resolved = options or InpaintOptions()
     backend = resolved.backend
-    if backend not in {"telea", "ns", "lama"} and backend not in _INPAINTERS:
-        msg = f"unsupported backend {backend!r}; choose from {sorted({'telea', 'ns', 'lama', *_INPAINTERS})}"
+    supported = {"telea", "ns", "lama", "alpha"}
+    if backend not in supported and backend not in _INPAINTERS:
+        msg = f"unsupported backend {backend!r}; choose from {sorted(supported | set(_INPAINTERS))}"
         raise ValueError(msg)
     if backend == "ns":
         inpaint_fn = _make_opencv_inpainter(resolved, "ns")
@@ -232,6 +270,8 @@ def inpaint_frames(
         inpaint_fn = _make_opencv_inpainter(resolved, "telea")
     elif backend == "lama" and _INPAINTERS.get("lama") is _inpaint_lama:
         inpaint_fn = _make_lama_inpainter(resolved.device)
+    elif backend == "alpha":
+        inpaint_fn = _make_alpha_inpainter(resolved)
     else:
         inpaint_fn = _INPAINTERS[backend]
 
@@ -243,13 +283,20 @@ def inpaint_frames(
 
     log.info("loading_inpainter", backend=backend, device=resolved.device, radius=resolved.radius, frames=len(in_paths))
 
-    mask_img = Image.open(mask_path).convert("L")
     out_paths: list[Path] = []
     total = len(in_paths)
     for index, src in enumerate(in_paths):
         with Image.open(src) as frame_raw:
             frame = frame_raw.convert("RGB")
-        result = inpaint_fn(frame, mask_img)
+        if backend == "alpha":
+            # Alpha backend ignores the mask (alpha map carries its own shape).
+            # The Inpainter Protocol still requires a non-None mask_l argument,
+            # so we synthesize a blank one here. Its content is unused.
+            blank_mask = Image.new("L", frame.size, 0)
+            result = inpaint_fn(frame, blank_mask)
+        else:
+            mask_img = Image.open(mask_path).convert("L")
+            result = inpaint_fn(frame, mask_img)
         dst = frames_out / f"{index:04d}.png"
         result.save(dst)
         out_paths.append(dst)

@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     frames_in_dir: Path = Path(__file__).resolve().parents[2] / "frames_in"
     frames_out_dir: Path = Path(__file__).resolve().parents[2] / "frames_out"
     mask_path: Path = Path(__file__).resolve().parents[2] / "mask.png"
+    alpha_map_path: Path = Path(__file__).resolve().parents[2] / "data" / "gemini_alpha_dual_96_from_grey.npy"
+    logo_map_path: Path = Path(__file__).resolve().parents[2] / "data" / "gemini_logo_rgb_96_from_grey.npy"
 
     source_video: Path = Path(__file__).resolve().parents[2] / "omni.mp4"
     output_video: Path = Path(__file__).resolve().parents[2] / "omni_clean.mp4"

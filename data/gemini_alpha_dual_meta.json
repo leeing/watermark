@@ -1,0 +1,37 @@
+{
+  "background_rgb": [
+    126,
+    126,
+    127
+  ],
+  "logo_rgb": [
+    255,
+    255,
+    255
+  ],
+  "bbox": [
+    851,
+    1691,
+    947,
+    1787
+  ],
+  "source": "grey.mp4",
+  "alpha_shape": [
+    96,
+    96
+  ],
+  "alpha_max": 0.5569888949394226,
+  "alpha_mean": 0.06902008503675461,
+  "alpha_nonzero": 6802,
+  "created_at": "2026-06-06T15:33:31.323371+00:00",
+  "alpha_path": "gemini_alpha_dual_96_from_grey.npy",
+  "logo_map_path": "gemini_logo_rgb_96_from_grey.npy",
+  "model": "per-pixel white-highlight/black-shadow reverse alpha",
+  "white_pixels": 1882,
+  "black_pixels": 4920,
+  "logo_map_shape": [
+    96,
+    96,
+    3
+  ]
+}

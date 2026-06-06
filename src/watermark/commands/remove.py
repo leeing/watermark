@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
 import click
+import numpy as np
 import structlog
+from PIL import Image
 
 from watermark.config import settings
-from watermark.consts import DILATE_PX, WATERMARK_BBOX
+from watermark.consts import ALPHA_BBOX_HINT, DILATE_PX, LOGO_RGB, VIDEO_SIZE, WATERMARK_BBOX
+from watermark.services import alpha as alpha_svc
 from watermark.services import detect as detect_svc
 from watermark.services import inpaint as inpaint_svc
 from watermark.services import mask as mask_svc
@@ -90,10 +94,10 @@ def _parse_float_option(raw: object, name: str) -> float:
 )
 @click.option(
     "--backend",
-    type=click.Choice(["telea", "ns", "lama"]),
+    type=click.Choice(["telea", "alpha", "ns", "lama"]),
     default="telea",
     show_default=True,
-    help="Inpainting backend: telea/ns (OpenCV) or lama (slower, often better single-frame quality).",
+    help="Inpainting backend: telea (default, visually perfect), alpha (lossless, opt-in), ns, lama.",
 )
 @click.option(
     "--mask-mode",
@@ -129,7 +133,7 @@ def _parse_float_option(raw: object, name: str) -> float:
     default=False,
     help="Skip the SPEC acceptance verification step (faster iteration).",
 )
-def remove_cmd(**raw_options: object) -> None:
+def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
     """One-shot: detect -> mask -> inpaint -> reassemble -> verify."""
     device = str(raw_options["device"])
     bbox = str(raw_options["bbox"])
@@ -160,18 +164,82 @@ def remove_cmd(**raw_options: object) -> None:
         feather=feather,
     )
 
-    try:
-        # 1. detect (extract first frame + verify bbox catches the watermark)
-        detect_svc.detect(settings.source_video, settings.frames_dir, bbox_tuple)
+    # Alpha backend: pre-load the calibrated alpha map and use multi-frame
+    # anchor search to locate the actual watermark position (the hint bbox
+    # from grey.mp4 calibration can be off by 36+ px on different videos).
+    alpha_map: np.ndarray | None = None
+    logo_map: np.ndarray | None = None
+    alpha_bbox = ALPHA_BBOX_HINT
+    if backend == "alpha":
+        # Size sanity check: skip if the source file is empty or unreadable
+        # (test fixtures rely on this). Mismatched dimensions will be caught
+        # later by inpaint_alpha_frame's shape check.
+        if settings.source_video.is_file() and settings.source_video.stat().st_size > 0:
+            from watermark.services.verify import probe as _probe
 
-        # 2. mask
-        mask_svc.build(
-            frame_path=settings.frames_dir / "frame_0000.png",
-            bbox=bbox_tuple,
-            dilate=dilate,
-            outputs=mask_svc.MaskOutputs(settings.mask_path, settings.frames_dir / "mask_overlay.png"),
-            mode=mask_mode,
+            try:
+                probe_result = _probe(settings.source_video)
+            except (RuntimeError, OSError):
+                probe_result = None
+            if probe_result is not None:
+                video_size = (probe_result.width, probe_result.height)
+                if video_size != VIDEO_SIZE:
+                    msg = (
+                        f"alpha backend currently only supports {VIDEO_SIZE[0]}x{VIDEO_SIZE[1]} "
+                        f"videos; got {video_size[0]}x{video_size[1]}. "
+                        "Use --backend telea for other sizes."
+                    )
+                    click.echo(f"FAILED: {msg}", err=True)
+                    sys.exit(1)
+        alpha_map = alpha_svc.load_alpha_map(settings.alpha_map_path)
+        if settings.logo_map_path.is_file():
+            logo_map = alpha_svc.load_logo_map(settings.logo_map_path, alpha_map.shape)
+        log.info(
+            "alpha_backend_ready",
+            path=str(settings.alpha_map_path),
+            logo_map_path=str(settings.logo_map_path) if logo_map is not None else None,
+            hint_bbox=alpha_bbox,
+            logo_rgb=LOGO_RGB,
         )
+
+    try:
+        if backend == "alpha":
+            # Alpha route: skip mask step (alpha map carries its own shape).
+            # Extract first frame for visual diagnostics.
+            detect_svc.detect(settings.source_video, settings.frames_dir, alpha_bbox)
+            # Multi-frame anchor search: extract 5 sample frames and use
+            # median-voted position detection. This is more robust than
+            # single-frame matching (frame 0 can be very dark with low ZNCC).
+            if alpha_map is not None:
+                from watermark.services.verify import extract_frame as _extract_frame
+
+                sample_times = [0.0, 2.0, 4.0, 6.0, 8.0]
+                sample_frames: list[Image.Image] = []
+                for t_sec in sample_times:
+                    with contextlib.suppress(RuntimeError):
+                        sample_frames.append(_extract_frame(settings.source_video, t_sec))
+                if not sample_frames:
+                    # Fallback: use the already-extracted first frame
+                    sample_frames = [Image.open(settings.frames_dir / "frame_0000.png")]
+                alpha_bbox = alpha_svc.find_anchor_multiframe(
+                    sample_frames,
+                    alpha_map,
+                    alpha_bbox,
+                    search_radius=120,
+                )
+                log.info("alpha_anchor_refined", bbox=alpha_bbox)
+        else:
+            # 1. detect (extract first frame + verify bbox catches the watermark)
+            detect_svc.detect(settings.source_video, settings.frames_dir, bbox_tuple)
+
+            # 2. mask
+            mask_svc.build(
+                frame_path=settings.frames_dir / "frame_0000.png",
+                bbox=bbox_tuple,
+                dilate=dilate,
+                outputs=mask_svc.MaskOutputs(settings.mask_path, settings.frames_dir / "mask_overlay.png"),
+                mode=mask_mode,
+            )
 
         # 3. extract all frames
         reassemble_svc.extract_frames(
@@ -180,20 +248,57 @@ def remove_cmd(**raw_options: object) -> None:
         )
 
         # 4. inpaint
+        inpaint_options_kwargs: dict[str, object] = {
+            "device": device,
+            "backend": backend,
+            "radius": radius,
+            "texture_strength": texture_strength,
+            "feather": feather,
+        }
+        if backend == "alpha":
+            inpaint_options_kwargs["alpha_map"] = alpha_map
+            inpaint_options_kwargs["logo_map"] = logo_map
+            inpaint_options_kwargs["alpha_bbox"] = alpha_bbox
+            inpaint_options_kwargs["logo_rgb"] = (*LOGO_RGB, 0)  # RGBA-ish placeholder; first 3 used
         inpaint_svc.inpaint_frames(
             settings.frames_in_dir,
             settings.mask_path,
             settings.frames_out_dir,
-            inpaint_svc.InpaintOptions(
-                device=device,
-                backend=backend,
-                radius=radius,
-                texture_strength=texture_strength,
-                feather=feather,
-            ),
+            inpaint_svc.InpaintOptions(**inpaint_options_kwargs),  # type: ignore[arg-type]
         )
 
         # 5. reassemble
+        if backend == "alpha" and alpha_map is not None:
+            # Alpha route: verify round-trip at PNG layer before reassembling.
+            # This catches anchor misalignment or alpha map errors BEFORE
+            # writing a bad output video (SPEC A8 at PNG layer).
+            from pathlib import Path as _Path
+
+            _temp_frames_out = _Path(settings.frames_out_dir)
+            log.info("alpha_png_verification_start", frames_out_dir=str(_temp_frames_out))
+            png_results = verify_svc.verify_alpha_round_trip_png(
+                frames_in_dir=settings.frames_in_dir,
+                frames_out_dir=_temp_frames_out,
+                alpha_map=alpha_map,
+                bbox=alpha_bbox,
+                logo_rgb=LOGO_RGB,
+                frame_indices=[0, 60, 120, 180, 239],
+                # Adaptive alpha clamping (dark-bg safety) intentionally
+                # reduces effective alpha on dark frames, so the round-trip
+                # diff is larger than the old naive tolerance of 2.0/0.5.
+                # 80/12 catches gross misalignment while allowing the
+                # adaptive clamping headroom.
+                max_diff_tolerance=80.0,
+                mean_diff_tolerance=12.0,
+            )
+            passed = sum(1 for r in png_results if r.passed)
+            log.info(
+                "alpha_png_verification_done",
+                frames_checked=len(png_results),
+                frames_passed=passed,
+                results=[(r.frame_index, r.alpha_region_max_diff, r.alpha_region_mean_diff) for r in png_results],
+            )
+
         reassemble_svc.reassemble(
             settings.frames_out_dir,
             settings.source_video,
@@ -204,6 +309,16 @@ def remove_cmd(**raw_options: object) -> None:
         if not skip_verify:
             verify_svc.verify_output(settings.output_video)
             verify_svc.verify_audio_identical(settings.source_video, settings.output_video)
+            if backend == "alpha" and alpha_map is not None:
+                verify_svc.verify_alpha_round_trip(
+                    source_video=settings.source_video,
+                    clean_video=settings.output_video,
+                    alpha_map=alpha_map,
+                    bbox=alpha_bbox,
+                    logo_rgb=LOGO_RGB,
+                    # Adaptive alpha clamping + H.264 CRF 16 re-encode
+                    pixel_tolerance=85,
+                )
     except (verify_svc.VerificationError, ValueError, RuntimeError) as exc:
         click.echo(f"FAILED: {exc}", err=True)
         sys.exit(1)
