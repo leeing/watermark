@@ -184,6 +184,8 @@ def verify_alpha_round_trip(  # noqa: PLR0913
     bbox: tuple[int, int, int, int],
     logo_rgb: tuple[int, int, int] = (255, 255, 255),
     *,
+    logo_map: np.ndarray | None = None,
+    subpixel_shift: tuple[float, float] = (0.0, 0.0),
     frame_time: float = 5.0,
     pixel_tolerance: int = _DEFAULT_ALPHA_TOLERANCE,
 ) -> None:
@@ -209,12 +211,32 @@ def verify_alpha_round_trip(  # noqa: PLR0913
     src_np = np.asarray(src_frame, dtype=np.float32)
     clean_np = np.asarray(clean_frame, dtype=np.float32)
     left, top, right, bottom = bbox
+    h, w = bottom - top, right - left
     # alpha_map shape must match the bbox (sanity check, same as inpaint_alpha_frame)
-    if alpha_map.shape != (bottom - top, right - left):
-        msg = f"alpha_map shape {alpha_map.shape} doesn't match bbox size ({bottom - top}, {right - left})"
+    if alpha_map.shape != (h, w):
+        msg = f"alpha_map shape {alpha_map.shape} doesn't match bbox size ({h}, {w})"
         raise VerificationError(msg)
+
+    # Shift alpha and logo using cv2.warpAffine if needed
+    if subpixel_shift != (0.0, 0.0):
+        import cv2
+
+        dx, dy = subpixel_shift
+        m_mat = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+        alpha_map = cv2.warpAffine(
+            alpha_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+        )
+        if logo_map is not None:
+            logo_map = cv2.warpAffine(
+                logo_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+            )
+
+    if logo_map is not None:
+        logo = logo_map.astype(np.float32)
+    else:
+        logo = np.broadcast_to(np.array(logo_rgb, dtype=np.float32), (h, w, 3))
+
     alpha = alpha_map[..., np.newaxis]  # (h, w, 1)
-    logo = np.array(logo_rgb, dtype=np.float32)  # (3,)
     # Forward alpha: original * (1 - alpha) + logo * alpha
     # Only applied to the bbox region; outside the bbox, clean should match source
     expected_region = clean_np[top:bottom, left:right] * (1.0 - alpha) + logo * alpha
@@ -256,6 +278,8 @@ def verify_alpha_round_trip_png(  # noqa: PLR0913
     bbox: tuple[int, int, int, int],
     logo_rgb: tuple[int, int, int] = (255, 255, 255),
     *,
+    logo_map: np.ndarray | None = None,
+    subpixel_shift: tuple[float, float] = (0.0, 0.0),
     frame_indices: list[int] | None = None,
     max_diff_tolerance: float = 2.0,
     mean_diff_tolerance: float = 0.5,
@@ -278,6 +302,8 @@ def verify_alpha_round_trip_png(  # noqa: PLR0913
         alpha_map: (H, W) float32 array in [0, 1].
         bbox: (left, top, right, bottom) matching alpha_map shape.
         logo_rgb: per-channel logo color.
+        logo_map: per-pixel logo map.
+        subpixel_shift: sub-pixel shift to apply.
         frame_indices: which frame numbers to verify (default: [0, 60, 120, 180, 239]).
         max_diff_tolerance: maximum allowed per-pixel uint8 diff in alpha region.
         mean_diff_tolerance: maximum allowed mean per-pixel diff in alpha region.
@@ -289,15 +315,34 @@ def verify_alpha_round_trip_png(  # noqa: PLR0913
         VerificationError: if any frame fails the tolerance criteria.
     """
     left, top, right, bottom = bbox
-    if alpha_map.shape != (bottom - top, right - left):
-        msg = f"alpha_map shape {alpha_map.shape} doesn't match bbox size ({bottom - top}, {right - left})"
+    h, w = bottom - top, right - left
+    if alpha_map.shape != (h, w):
+        msg = f"alpha_map shape {alpha_map.shape} doesn't match bbox size ({h}, {w})"
         raise VerificationError(msg)
 
     if frame_indices is None:
         frame_indices = [0, 60, 120, 180, 239]
 
+    # Shift alpha and logo using cv2.warpAffine if needed
+    if subpixel_shift != (0.0, 0.0):
+        import cv2
+
+        dx, dy = subpixel_shift
+        m_mat = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+        alpha_map = cv2.warpAffine(
+            alpha_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+        )
+        if logo_map is not None:
+            logo_map = cv2.warpAffine(
+                logo_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+            )
+
+    if logo_map is not None:
+        logo = logo_map.astype(np.float32)
+    else:
+        logo = np.broadcast_to(np.array(logo_rgb, dtype=np.float32), (h, w, 3))
+
     alpha_3d = alpha_map[..., np.newaxis]
-    logo = np.array(logo_rgb, dtype=np.float32)
 
     results: list[PngRoundTripResult] = []
 

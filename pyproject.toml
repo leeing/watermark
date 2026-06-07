@@ -47,6 +47,7 @@ unfixable = ["S307", "S609", "S301", "S302", "S105", "S106", "S107"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "PLR2004", "ARG001"]
+"src/watermark/config.py" = ["ARG003"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

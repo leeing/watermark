@@ -448,3 +448,50 @@ def test_calibrate_from_solid_video_rejects_same_logo_and_bg(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="too close"):
         alpha_svc.calibrate_from_solid_video(video_path, (100, 100, 100), logo_rgb=(100, 101, 100))
+
+
+def test_refine_subpixel_shift() -> None:
+    """refine_subpixel_shift recovers a known subpixel shift from synthetic frame."""
+    size = 32
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    center = size / 2.0
+    d2 = (xx - center) ** 2 + (yy - center) ** 2
+    alpha = np.clip(1.0 - d2 / 100.0, 0, 1).astype(np.float32)
+    logo = np.full((size, size, 3), 255.0, dtype=np.float32)
+
+    # Sub-pixel shift to plant: dx=-0.3, dy=0.2
+    planted_dx, planted_dy = -0.3, 0.2
+
+    import cv2
+
+    h, w = alpha.shape
+    m_mat = np.float32([[1, 0, planted_dx], [0, 1, planted_dy]])
+    alpha_shifted = cv2.warpAffine(
+        alpha, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    )
+    logo_shifted = cv2.warpAffine(
+        logo, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+    )
+
+    # Background: dark spatial gradient so that shift mismatch causes underflow
+    yy_bg, xx_bg = np.mgrid[0:64, 0:64].astype(np.float32)
+    bg = np.zeros((64, 64, 3), dtype=np.float32)
+    bg[..., 0] = xx_bg * 0.1
+    bg[..., 1] = yy_bg * 0.1
+    bg[..., 2] = (xx_bg + yy_bg) * 0.05
+
+    bbox = (10, 10, 10 + size, 10 + size)
+    left, top, right, bottom = bbox
+
+    # Apply forward blend with subpixel-shifted maps
+    region = bg[top:bottom, left:right]
+    alpha_3d = alpha_shifted[..., np.newaxis]
+    region[:] = region * (1.0 - alpha_3d) + logo_shifted * alpha_3d
+
+    frame = Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8))
+
+    # Recover sub-pixel shift
+    dx, dy = alpha_svc.refine_subpixel_shift([frame], alpha, None, bbox)
+
+    assert abs(dx - planted_dx) <= 0.06, f"expected {planted_dx} got {dx}"
+    assert abs(dy - planted_dy) <= 0.06, f"expected {planted_dy} got {dy}"

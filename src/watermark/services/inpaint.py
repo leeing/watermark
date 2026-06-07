@@ -43,11 +43,13 @@ class InpaintOptions:
     radius: int = TELEA_RADIUS
     texture_strength: float = 0.25
     feather: int = 2
+    lossless: bool = False  # skip clamping + feathering for mathematically pure reverse
     # Reverse alpha blending (Lossless.md) — only used when backend == "alpha"
     alpha_map: np.ndarray | None = None
     logo_map: np.ndarray | None = None
     alpha_bbox: tuple[int, int, int, int] | None = None
     logo_rgb: tuple[int, int, int, int] = (255, 255, 255, 255)
+    subpixel_shift: tuple[float, float] = (0.0, 0.0)
 
 
 class Inpainter(Protocol):
@@ -218,6 +220,8 @@ def _inpaint_alpha(
         options.alpha_bbox,
         (options.logo_rgb[0], options.logo_rgb[1], options.logo_rgb[2]),
         logo_map=options.logo_map,
+        lossless=options.lossless,
+        subpixel_shift=options.subpixel_shift,
     )
 
 

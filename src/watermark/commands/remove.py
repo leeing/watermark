@@ -11,7 +11,7 @@ import structlog
 from PIL import Image
 
 from watermark.config import settings
-from watermark.consts import ALPHA_BBOX_HINT, DILATE_PX, LOGO_RGB, VIDEO_SIZE, WATERMARK_BBOX
+from watermark.consts import ALPHA_BBOX_HINT, CRF_LOSSLESS, DILATE_PX, LOGO_RGB, VIDEO_SIZE, WATERMARK_BBOX
 from watermark.services import alpha as alpha_svc
 from watermark.services import detect as detect_svc
 from watermark.services import inpaint as inpaint_svc
@@ -128,6 +128,13 @@ def _parse_float_option(raw: object, name: str) -> float:
     help="Mask edge feather in pixels for repaired-region blending.",
 )
 @click.option(
+    "--lossless",
+    is_flag=True,
+    default=False,
+    help="Use CRF 0 for mathematically lossless H.264 (large file, pixel-perfect). "
+    "Also disables adaptive alpha clamping and edge feathering for pure reverse blend.",
+)
+@click.option(
     "--skip-verify",
     is_flag=True,
     default=False,
@@ -143,6 +150,7 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
     texture_strength = _parse_float_option(raw_options["texture_strength"], "--texture-strength")
     feather = _parse_int_option(raw_options["feather"], "--feather")
     skip_verify = bool(raw_options["skip_verify"])
+    lossless = bool(raw_options["lossless"])
     raw_mask_mode = str(raw_options["mask_mode"])
     mask_mode: MaskMode = "watermark" if raw_mask_mode == "watermark" else "rectangle"
 
@@ -158,6 +166,7 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
         bbox=bbox_tuple,
         dilate=dilate,
         backend=backend,
+        lossless=lossless,
         mask_mode=mask_mode,
         radius=radius,
         texture_strength=texture_strength,
@@ -210,6 +219,7 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
             # Multi-frame anchor search: extract 5 sample frames and use
             # median-voted position detection. This is more robust than
             # single-frame matching (frame 0 can be very dark with low ZNCC).
+            subpixel_shift = (0.0, 0.0)
             if alpha_map is not None:
                 from watermark.services.verify import extract_frame as _extract_frame
 
@@ -228,6 +238,15 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
                     search_radius=120,
                 )
                 log.info("alpha_anchor_refined", bbox=alpha_bbox)
+
+                # Sub-pixel shift refinement
+                subpixel_shift = alpha_svc.refine_subpixel_shift(
+                    sample_frames,
+                    alpha_map,
+                    logo_map,
+                    alpha_bbox,
+                )
+                log.info("alpha_subpixel_refined", shift=subpixel_shift)
         else:
             # 1. detect (extract first frame + verify bbox catches the watermark)
             detect_svc.detect(settings.source_video, settings.frames_dir, bbox_tuple)
@@ -254,12 +273,14 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
             "radius": radius,
             "texture_strength": texture_strength,
             "feather": feather,
+            "lossless": lossless,
         }
         if backend == "alpha":
             inpaint_options_kwargs["alpha_map"] = alpha_map
             inpaint_options_kwargs["logo_map"] = logo_map
             inpaint_options_kwargs["alpha_bbox"] = alpha_bbox
             inpaint_options_kwargs["logo_rgb"] = (*LOGO_RGB, 0)  # RGBA-ish placeholder; first 3 used
+            inpaint_options_kwargs["subpixel_shift"] = subpixel_shift
         inpaint_svc.inpaint_frames(
             settings.frames_in_dir,
             settings.mask_path,
@@ -282,14 +303,11 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
                 alpha_map=alpha_map,
                 bbox=alpha_bbox,
                 logo_rgb=LOGO_RGB,
+                logo_map=logo_map,
+                subpixel_shift=subpixel_shift,
                 frame_indices=[0, 60, 120, 180, 239],
-                # Adaptive alpha clamping (dark-bg safety) intentionally
-                # reduces effective alpha on dark frames, so the round-trip
-                # diff is larger than the old naive tolerance of 2.0/0.5.
-                # 80/12 catches gross misalignment while allowing the
-                # adaptive clamping headroom.
-                max_diff_tolerance=80.0,
-                mean_diff_tolerance=12.0,
+                max_diff_tolerance=settings.alpha_png_max_diff_tolerance,
+                mean_diff_tolerance=settings.alpha_png_mean_diff_tolerance,
             )
             passed = sum(1 for r in png_results if r.passed)
             log.info(
@@ -303,6 +321,7 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
             settings.frames_out_dir,
             settings.source_video,
             settings.output_video,
+            crf=CRF_LOSSLESS if lossless else None,
         )
 
         # 6. verify
@@ -316,8 +335,9 @@ def remove_cmd(**raw_options: object) -> None:  # noqa: C901, PLR0912, PLR0915
                     alpha_map=alpha_map,
                     bbox=alpha_bbox,
                     logo_rgb=LOGO_RGB,
-                    # Adaptive alpha clamping + H.264 CRF 16 re-encode
-                    pixel_tolerance=85,
+                    logo_map=logo_map,
+                    subpixel_shift=subpixel_shift,
+                    pixel_tolerance=int(settings.alpha_h264_pixel_tolerance),
                 )
     except (verify_svc.VerificationError, ValueError, RuntimeError) as exc:
         click.echo(f"FAILED: {exc}", err=True)

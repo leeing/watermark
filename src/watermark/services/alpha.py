@@ -168,7 +168,7 @@ def inpaint_alpha_frame(
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 
-def adaptive_reverse_blend(  # noqa: PLR0913
+def adaptive_reverse_blend(  # noqa: PLR0913, PLR0915
     frame_rgb: Image.Image,
     alpha_map: np.ndarray,
     bbox: tuple[int, int, int, int],
@@ -177,6 +177,8 @@ def adaptive_reverse_blend(  # noqa: PLR0913
     logo_map: np.ndarray | None = None,
     corner_size: int = 8,  # noqa: ARG001 — kept for API compat
     feather_width: int = DEFAULT_ALPHA_FEATHER_WIDTH,
+    lossless: bool = False,
+    subpixel_shift: tuple[float, float] = (0.0, 0.0),
 ) -> Image.Image:
     """Apply reverse alpha blending with per-pixel background-aware clamping.
 
@@ -191,6 +193,12 @@ def adaptive_reverse_blend(  # noqa: PLR0913
     alpha region to prevent visible seams between modified and unmodified
     pixels.
 
+    When *lossless* is True, both adaptive clamping and edge feathering are
+    disabled — the pure mathematical inverse ``(wm - α·logo) / (1-α)`` is
+    applied across the whole bbox. This can produce negative pixel values
+    on very dark frames where the watermark is faint, but guarantees
+    mathematically exact recovery where the alpha map is correct.
+
     Args:
         frame_rgb: a PIL Image in RGB mode.
         alpha_map: ``(H, W)`` float32 array from ``load_alpha_map``.
@@ -200,7 +208,11 @@ def adaptive_reverse_blend(  # noqa: PLR0913
             for watermarks that mix white highlight pixels with black shadow
             pixels.
         corner_size: unused (kept for backward compatibility).
-        feather_width: edge feather radius in pixels (0 to disable).
+        feather_width: edge feather radius in pixels (0 to disable). Ignored
+            when *lossless* is True.
+        lossless: if True, skip adaptive clamping and feathering for a pure
+            mathematical inverse.
+        subpixel_shift: (dx, dy) sub-pixel shift to align the alpha map.
 
     Returns:
         A new PIL Image with the alpha region restored.
@@ -210,6 +222,20 @@ def adaptive_reverse_blend(  # noqa: PLR0913
     if (right - left) != w or (bottom - top) != h:
         msg = f"bbox {(left, top, right, bottom)} doesn't match alpha map shape {(h, w)}"
         raise AlphaMapError(msg)
+
+    # Shift alpha and logo using cv2.warpAffine if needed
+    if subpixel_shift != (0.0, 0.0):
+        import cv2
+
+        dx, dy = subpixel_shift
+        m_mat = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+        alpha_map = cv2.warpAffine(
+            alpha_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+        )
+        if logo_map is not None:
+            logo_map = cv2.warpAffine(
+                logo_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+            )
 
     frame_np = np.asarray(frame_rgb.convert("RGB"), dtype=np.float32)
     out = frame_np.copy()
@@ -221,6 +247,14 @@ def adaptive_reverse_blend(  # noqa: PLR0913
         logo = np.clip(logo_map.astype(np.float32), 0.0, _MAX_CHANNEL_VALUE)
     else:
         logo = np.broadcast_to(np.array(logo_rgb, dtype=np.float32), (h, w, 3))
+
+    if lossless:
+        # Pure mathematical inverse: no clamping, no feathering.
+        alpha_3d = alpha_map[..., np.newaxis].astype(np.float32)
+        denom = 1.0 - alpha_3d + _DENOM_EPSILON
+        region[:] = (region - alpha_3d * logo) / denom
+        log.debug("alpha_lossless", bbox=bbox, alpha_max=float(alpha_map.max()))
+        return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
     # Per-pixel safe alpha: for each pixel, the maximum alpha that keeps the
     # reverse formula within [0, 255]. Since restored = (wm - α·logo)/(1-α),
@@ -717,3 +751,76 @@ def calibrate_from_solid_video(  # noqa: PLR0913, PLR0915
         alpha_nonzero=meta["alpha_nonzero"],
     )
     return alpha, meta
+
+
+def refine_subpixel_shift(
+    frames: list[Image.Image],
+    alpha_map: np.ndarray,
+    logo_map: np.ndarray | None,
+    bbox: tuple[int, int, int, int],
+) -> tuple[float, float]:
+    """Find the optimal sub-pixel shift to align the alpha map with the video.
+
+    Args:
+        frames: list of PIL Images (sampled frames).
+        alpha_map: (H, W) float32 alpha map.
+        logo_map: (H, W, 3) float32 logo map or None.
+        bbox: refined integer bbox.
+
+    Returns:
+        (dx, dy) sub-pixel shift to apply to the alpha and logo maps.
+    """
+    import cv2
+
+    left, top, right, bottom = bbox
+    h, w = alpha_map.shape
+
+    # Pre-extract regions and convert to float32
+    regions = []
+    for frame in frames:
+        frame_np = np.asarray(frame.convert("RGB"), dtype=np.float32)
+        regions.append(frame_np[top:bottom, left:right])
+
+    if logo_map is not None:
+        logo = logo_map.astype(np.float32)
+    else:
+        logo = np.broadcast_to(np.array([255.0, 255.0, 255.0], dtype=np.float32), (h, w, 3))
+
+    best_dx, best_dy = 0.0, 0.0
+    min_total_underflow = float("inf")
+
+    # Grid search in [-1.0, 1.0] with step 0.05
+    dx_range = np.arange(-1.0, 1.05, 0.05)
+    dy_range = np.arange(-1.0, 1.05, 0.05)
+
+    for dy in dy_range:
+        for dx in dx_range:
+            # Shift alpha and logo using cv2.warpAffine
+            m_mat = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+            alpha_shifted = cv2.warpAffine(
+                alpha_map, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+            )
+            logo_shifted = cv2.warpAffine(
+                logo, m_mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+            )
+
+            alpha_3d = alpha_shifted[..., np.newaxis]
+            denom = 1.0 - alpha_3d + _DENOM_EPSILON
+
+            total_underflow = 0.0
+            for region in regions:
+                restored = (region - alpha_3d * logo_shifted) / denom
+                negatives = restored[restored < 0]
+                total_underflow += float(np.sum(np.abs(negatives)))
+
+            if total_underflow < min_total_underflow:
+                min_total_underflow = total_underflow
+                best_dx, best_dy = float(dx), float(dy)
+
+    log.info(
+        "subpixel_refinement_done",
+        best_dx=best_dx,
+        best_dy=best_dy,
+        min_total_underflow=min_total_underflow,
+    )
+    return best_dx, best_dy

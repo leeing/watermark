@@ -21,6 +21,7 @@ DILATE_PX: Final[int] = 4
 
 # Reassembly encoding
 CRF: Final[int] = 16
+CRF_LOSSLESS: Final[int] = 0  # H.264 mathematically lossless (huge file, but pixel-perfect)
 PRESET: Final[str] = "medium"
 PIX_FMT: Final[str] = "yuv420p"
 

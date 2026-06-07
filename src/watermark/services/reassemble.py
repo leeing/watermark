@@ -64,7 +64,7 @@ def reassemble(  # noqa: PLR0913
     out_video: Path,
     *,
     fps: int = FPS,
-    crf: int = CRF,
+    crf: int | None = None,
     preset: str = PRESET,
     pix_fmt: str = PIX_FMT,
     ffmpeg: str | None = None,
@@ -74,6 +74,7 @@ def reassemble(  # noqa: PLR0913
     Audio is passed through with `-c:a copy` — byte-identical, no re-encode.
     """
     binary = ffmpeg or resolve_ffmpeg()
+    resolved_crf = crf if crf is not None else CRF
     out_video.parent.mkdir(parents=True, exist_ok=True)
     pattern = str(frames_dir / "%04d.png")
     cmd: list[str] = [
@@ -92,7 +93,7 @@ def reassemble(  # noqa: PLR0913
         "-c:v",
         "libx264",
         "-crf",
-        str(crf),
+        str(resolved_crf),
         "-preset",
         preset,
         "-pix_fmt",
@@ -101,7 +102,7 @@ def reassemble(  # noqa: PLR0913
         "copy",
         str(out_video),
     ]
-    log.info("reassembling", frames=str(frames_dir), out=str(out_video), crf=crf, preset=preset)
+    log.info("reassembling", frames=str(frames_dir), out=str(out_video), crf=resolved_crf, preset=preset)
     completed = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
     if completed.returncode != 0:
         msg = f"ffmpeg reassemble failed (rc={completed.returncode}): {completed.stderr[-500:]}"
